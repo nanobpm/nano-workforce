@@ -19,6 +19,8 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { generationGuard, recordAdjudication } from "../../app/adjudications.ts";
 import { taskCompletions } from "../../app/agentCompletion.ts";
+import { runGh } from "../../app/github.ts";
+import { answeredByFromActorKind, isOperatorDecision, postAgentScopeDecisionNote, type ScopeNoteDeps } from "../../app/scopeDecision.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 interface Escalation extends Record<string, unknown> {
@@ -58,7 +60,21 @@ function nonBlankInt(v: unknown): number | undefined {
   return undefined;
 }
 
-const handler: AppJobHandler<In> = async (job, app) => {
+/** The real GitHub seam for the "scope reduced by agent decision" note (issue #1108). */
+const ghScopeNoteDeps: ScopeNoteDeps = {
+  prBody: async (repo, prNumber) =>
+    (await runGh(["pr", "view", String(prNumber), "--repo", repo, "--json", "body", "--jq", ".body"], { timeoutMs: 30_000 })).trim(),
+  comment: async (repo, number, body) => {
+    await runGh(["issue", "comment", String(number), "--repo", repo, "--body", body], { timeoutMs: 30_000 });
+  },
+};
+
+/** Build the handler over an injectable GitHub seam (tests pass a fake; production uses `gh`). */
+export function makeAnswerEscalationHandler(scopeNoteDeps: ScopeNoteDeps = ghScopeNoteDeps): AppJobHandler<In> {
+  return (job, app) => answerEscalation(job, app, scopeNoteDeps);
+}
+
+async function answerEscalation(job: Parameters<AppJobHandler<In>>[0], app: Parameters<AppJobHandler<In>>[1], scopeNoteDeps: ScopeNoteDeps): Promise<Record<string, unknown>> {
   const { prKey } = job.variables;
   const answer = nonBlank(job.variables.answer);
   // The exact identity of the `wait-*` completion that resumed THIS token (Copilot review of #806),
@@ -119,6 +135,9 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // resume). If an `escalationId` was carried but no OPEN row bears it, this is a redelivered answer for
   // an escalation that has already been retired (or superseded by a newer question) — no-op rather than
   // misfile the answer under a different escalation's question (Copilot review of #806).
+  // Who answered (issue #1108) — derived from the winning completion's AUTH identity in the ledger,
+  // never from the answer text. `unknown` until a ledger row is correlated (fails safe: non-operator).
+  let answeredBy = answeredByFromActorKind(undefined);
   const target = escalationId != null ? open.find((e) => e.id === escalationId) : open[0];
   if (target !== undefined) {
     const ts = new Date().toISOString();
@@ -130,6 +149,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
     // the answered question could re-escalate after restart. Scoped to convergence answers only.
     if (isConvergence) {
       const adjudicator = await latestAdjudicator(app, job.processInstanceKey, answer, completedUserTaskKey, completedCompletionId);
+      answeredBy = answeredByFromActorKind(adjudicator?.kind);
       await recordAdjudication(app.data, {
         prKey,
         question: target.question,
@@ -181,8 +201,21 @@ const handler: AppJobHandler<In> = async (job, app) => {
       [ts, prKey, ...guard.params],
     );
   }
-  return {};
-};
+  if (!isConvergence) return {};
+  // A SCOPE escalation answered by anything other than the operator is not an operator decision: post
+  // the visible "scope reduced by agent decision" note on the PR and its linked issues (issue #1108).
+  // Best-effort — a GitHub failure never fails the reconcile. Only for the answer that actually
+  // retired an open escalation (`target`), so a redelivery does not re-post.
+  const repo = nonBlank(job.variables.repo);
+  const prNumber = nonBlankInt(job.variables.prNumber);
+  if (target !== undefined && job.variables.scopePending === true && !isOperatorDecision(answeredBy) && repo !== undefined && prNumber !== undefined) {
+    await postAgentScopeDecisionNote(
+      { repo, prNumber, prUrl: nonBlank(job.variables.prUrl) ?? `${repo}#${prNumber}`, answeredBy, answer },
+      scopeNoteDeps,
+    );
+  }
+  return { answeredBy };
+}
 
 /** Who just completed this `wait-answer`: the `{ id, kind }` of the `task_completions` row that
  *  actually WON the user-task race, so the durable adjudication is attributed to the completion the
@@ -253,4 +286,4 @@ function completionAnswer(variablesJson: unknown): string | undefined {
   }
 }
 
-export default handler;
+export default makeAnswerEscalationHandler();

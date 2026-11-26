@@ -183,8 +183,9 @@ remainder honestly in a `## Scope` section, yet still `Closes #N`'d the broader
 parent and filed **no** follow-up. The issue read as done, `gh issue list` showed
 nothing outstanding, and a downstream consumer was blocked on exactly the
 deferred half. The classifier reads each closing-keyword issue's acceptance
-criteria and **blocks and escalates to a human** only on a *genuine* untracked
-under-delivery — not on the mere presence of the word "deferred". Two rules keep
+criteria and **blocks** any closing keyword on an issue whose stated scope the PR
+does not fully deliver — tracked follow-up or not — but not on the mere presence of
+the word "deferred". Two rules keep
 you on the right side of it:
 
 1. **A `Closes/Fixes/Resolves #N` closing keyword means you delivered #N's FULL
@@ -192,7 +193,9 @@ you on the right side of it:
    — do **not** close-keyword the parent. Use a non-closing ref instead
    (`Refs #N` / `Part of #N`) and **leave #N open** (or convert #N into a
    tracking/umbrella issue for the remainder). The classifier flags a PR that
-   closes #N while leaving part of #N's stated scope undelivered and untracked.
+   closes #N while leaving part of #N's stated scope undelivered — **even when the
+   remainder is tracked by a linked follow-up** (a follow-up makes a partial PR mergeable,
+   never a reason to close the parent).
    **This rule governs your COMMIT MESSAGES and your PR TITLE too, not just the PR
    body.** This repo family squash-merges with `COMMIT_MESSAGES`, so a `Closes #N`
    in **any commit body** closes the issue on merge — even after you correct the PR

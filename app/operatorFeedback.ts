@@ -126,11 +126,24 @@ export function runStartOnIssue(comments: IssueComment[], fallbackIso: string | 
 /** Issue numbers the PR CLOSES (`Closes/Fixes/Resolves #N` or `owner/repo#N` in the same repo), from
  *  its title and body. Non-closing refs (`Part of #N`, `Refs #N`) are excluded by construction. */
 export function parseClosingIssueNumbers(text: string, repo: string): number[] {
+  return issueRefsAfter(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s+(\S+)/gi, text, repo);
+}
+
+/** Issue numbers the PR LINKS as its subject — closing refs PLUS the non-closing `Part of #N` /
+ *  `Refs #N` (issue #1108: the "scope reduced by agent decision" note goes on the issue whether the PR
+ *  still closes it or was reworded to `Part of`). `Follow-up:`/`Deferred-to:` trackers are excluded. */
+export function parseLinkedIssueNumbers(text: string, repo: string): number[] {
+  const closing = parseClosingIssueNumbers(text, repo);
+  const partOf = issueRefsAfter(/\b(?:part\s+of|refs?)\b:?\s+(\S+)/gi, text, repo);
+  return [...new Set([...closing, ...partOf])].sort((a, b) => a - b);
+}
+
+/** The issue numbers named by the single reference token after each `keywordRe` match (capture 1). */
+function issueRefsAfter(keywordRe: RegExp, text: string, repo: string): number[] {
   // The keyword is followed by one reference token; a bare `#N` is this repo, and a qualified
   // `owner/repo#N` is or an `/issues/` URL is resolved through the ONE issue grammar (`parseIssue`) — no second shape regex.
-  const re = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s+(\S+)/gi;
   const out = new Set<number>();
-  for (const m of text.matchAll(re)) {
+  for (const m of text.matchAll(keywordRe)) {
     const token = m[1].replace(/[.,;:)]+$/, "");
     if (/^#\d+$/.test(token)) out.add(Number(token.slice(1)));
     else {
