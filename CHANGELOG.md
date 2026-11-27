@@ -1,3 +1,9 @@
+## [0.236.1](https://github.com/nanobpm/nano-workforce/compare/v0.236.0...v0.236.1) (2026-11-27)
+
+### Documentation
+
+* run Nano Workforce on Camunda 8.10 via c8run ([#1107](https://github.com/nanobpm/nano-workforce/issues/1107)) ([c657b3a](https://github.com/nanobpm/nano-workforce/commit/c657b3a5f04be9006c64e156352ca5009ac28ffd)), closes [#1106](https://github.com/nanobpm/nano-workforce/issues/1106)
+
 ## [0.236.0](https://github.com/nanobpm/nano-workforce/compare/v0.235.0...v0.236.0) (2026-11-26)
 
 ### Features
