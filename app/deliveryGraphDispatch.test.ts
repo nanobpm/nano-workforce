@@ -109,7 +109,7 @@ function makeApp(opts: { failIdentityWrite?: boolean; reconcileReadThrows?: { on
       // variable is absent/unreadable — it must NOT be cancelled (unproven ownership).
       searchProcessInstances: (filter?: { processDefinitionId?: string; state?: string; processInstanceKeys?: string[] }) =>
         filter?.processInstanceKeys !== undefined
-          ? Promise.resolve(
+          ? Promise.resolve(opts.onInstanceRead?.()).then(() =>
               filter.processInstanceKeys.flatMap((k) => {
                 const state = opts.instanceStates?.get(k);
                 return state === undefined ? [] : [{ processInstanceKey: k, state }];
@@ -488,5 +488,29 @@ test("#1111 dispatchDeliveryGraphRun: a run whose instance TERMINATED out of ban
   instanceStates.set("PI-1", "TERMINATED");
   const again = await dispatchDeliveryGraphRun(app, HUMAN_ONLY, { repoless: true });
   assert(again.ok && !again.alreadyRunning);
+  assertEquals(started.length, 2);
+});
+
+test("#1111 dispatchDeliveryGraphRun: when the poller settles the row DURING the engine read (settle CAS loses), dispatch re-reads and relaunches instead of short-circuiting on the stale snapshot", async () => {
+  const instanceStates = new Map<string, string>();
+  let racePoller = false;
+  const holder: { runs?: () => Record<string, unknown>[] } = {};
+  const { app, started, runs } = makeApp({
+    instanceStates,
+    onInstanceRead: () => {
+      // Replace (not mutate) the row so dispatch's pre-read snapshot really is stale, as with a real DB.
+      if (racePoller && holder.runs) {
+        const rows = holder.runs();
+        rows[0] = { ...rows[0], status: "done", phase: "done" };
+      }
+    },
+  });
+  holder.runs = runs;
+  const first = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });
+  assert(first.ok);
+  instanceStates.set("PI-1", "COMPLETED");
+  racePoller = true;
+  const again = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });
+  assert(again.ok && !again.alreadyRunning, "a lost settle CAS must not leave dispatch on the stale running snapshot");
   assertEquals(started.length, 2);
 });

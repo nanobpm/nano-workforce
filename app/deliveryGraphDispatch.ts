@@ -199,8 +199,11 @@ export async function dispatchDeliveryGraphRun(
       const settled = await settleEndedRunningRun(app.data, app.engine, existing);
       if (settled !== null) {
         app.log.info("dispatch-delivery-graph closed a running row whose instance had ended", { runKey, status: settled, processInstanceKey: existing.process_key });
-        existing = await runs.get(runKey);
       }
+      // Re-read UNCONDITIONALLY after a successful engine check: a `null` can also mean the settlement
+      // CAS lost to a concurrent poller pass that already flipped the row to `done`, so the pre-check
+      // snapshot may be stale and must never drive the claim/short-circuit decision below.
+      existing = await runs.get(runKey);
     } catch (err) {
       app.log.warn("dispatch-delivery-graph could not check the running row against the engine", { runKey, error: String(err) });
     }
