@@ -390,11 +390,17 @@ export async function markProposalDispatched(data: DataLayer, digest: string, ex
 
 /** Undo a pre-launch {@link markProposalDispatched} claim when the launch it fenced then FAILED (issue
  * #1111 review), so the approval can be retried. Guarded on `status='dispatched'` AND the exact
- * `stage_seq` that was consumed, so it can never resurrect a different revision. */
+ * `stage_seq` that was consumed, so it can never resurrect a different revision.
+ *
+ * The return goes through the SAME supersession rule `stageProposal` applies, atomically in the one
+ * UPDATE: if a strictly-newer revision (higher, globally-monotonic `stage_seq`) of the same
+ * `logical_key` was staged while this approval was held `dispatched`, the approval lands `superseded`
+ * rather than `staged` — so a failed launch can never leave two dispatchable revisions of one logical
+ * graph. The original stage order (`stage_seq`) is preserved; nothing is re-sequenced. */
 export async function markProposalUndispatched(data: DataLayer, digest: string, stageSeq: number): Promise<boolean> {
   const db = data.open();
   const res = await db.exec(
-    `UPDATE "delivery_graph_proposals" SET "status" = 'staged', "updated_at" = ? WHERE "digest" = ? AND "status" = 'dispatched' AND "stage_seq" = ?`,
+    `UPDATE "delivery_graph_proposals" SET "status" = CASE WHEN EXISTS (SELECT 1 FROM "delivery_graph_proposals" AS "newer" WHERE "newer"."logical_key" = "delivery_graph_proposals"."logical_key" AND "newer"."digest" <> "delivery_graph_proposals"."digest" AND "newer"."status" = 'staged' AND "newer"."stage_seq" > "delivery_graph_proposals"."stage_seq") THEN 'superseded' ELSE 'staged' END, "updated_at" = ? WHERE "digest" = ? AND "status" = 'dispatched' AND "stage_seq" = ?`,
     [now(), digest, stageSeq],
   );
   return res.changed > 0;
