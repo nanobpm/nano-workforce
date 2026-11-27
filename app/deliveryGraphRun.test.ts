@@ -635,3 +635,35 @@ test("deriveDeliveryPhase: multiple open human tasks pick the lowest element id 
   assertEquals(p.phase, "Parked on human node: first");
   assertEquals(p.phase_node_id, a);
 });
+
+test("#1111 pollDeliveryGraphPhase: a delayed COMPLETED projection never overwrites a live REPLACEMENT launched mid-pass", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    await runs.insert({ ...claimRow("running"), run_key: "rk", process_key: "PI-old", updated_at: ago(1000) });
+    const engine = {
+      // While the poller reads the OLD instance, a dispatch settles the row and launches a replacement.
+      searchProcessInstances: async () => {
+        await runs.update("rk", { status: "running", process_key: "PI-new", updated_at: new Date().toISOString() });
+        return [{ processInstanceKey: "PI-old", state: "COMPLETED" }];
+      },
+      searchUserTasks: async () => [],
+    };
+    await pollDeliveryGraphPhase(data, engine as never);
+    const row = await runs.get("rk");
+    assertEquals(row?.status, "running", "the live replacement is not marked done by the stale projection");
+    assertEquals(row?.process_key, "PI-new");
+  });
+});
+
+test("#1111 pollDeliveryGraphPhase: an ended instance still observed on the row is settled", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    await runs.insert({ ...claimRow("running"), run_key: "rk", process_key: "PI-old", updated_at: ago(1000) });
+    const engine = {
+      searchProcessInstances: async () => [{ processInstanceKey: "PI-old", state: "COMPLETED" }],
+      searchUserTasks: async () => [],
+    };
+    await pollDeliveryGraphPhase(data, engine as never);
+    assertEquals((await runs.get("rk"))?.status, "done");
+  });
+});

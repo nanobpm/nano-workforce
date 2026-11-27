@@ -485,7 +485,9 @@ before it short-circuits a re-dispatch as `alreadyRunning`, it reads the record'
 that instance has already COMPLETED (or was TERMINATED), dispatch closes the record the same way the
 poller would (`done` / `abandoned`, process instance key kept) and starts a new instance
 (`alreadyRunning: false`). So a record left `running` after its instance ended needs no operator
-action and is **not** cancelled: dispatch the digest again. If the engine does not report the
+action and is **not** cancelled: dispatch it again. A successful dispatch consumes its staged proposal
+(dispatching a consumed digest is rejected with `400`), so first **recompile the same graph** to
+re-stage it, then dispatch the returned digest. If the engine does not report the
 instance, dispatch keeps the safe `alreadyRunning` answer. A record with no instance key is a launch
 claim. After 15 minutes it is reclaimable by the next dispatch, which first cancels any still-live
 original of the run, or the poller retires it to `failed`.
