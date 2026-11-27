@@ -647,20 +647,34 @@ export interface AgentCompleteResult {
  *  tasks in ANY state) — a looping instance keeps COMPLETED/CANCELED tasks whose key could otherwise
  *  match and drive a doomed re-completion (a thrown 5xx) instead of the intended 404-style no-op.
  *
- *  When the CALLER already knows the task's owning `processInstanceKey` (the convergence poller does —
- *  it just discovered the task in its sweep), pass it so the resolve scans that ONE instance instead of
- *  every open user task engine-wide. The auto-apply resume runs this once per already-adjudicated PR in
- *  a single poll pass, so an unfiltered global scan there is O(N²) work/REST load across the fleet
- *  (Copilot review of #806); a `processInstanceKey`-filtered scan makes it O(N). The filter never
- *  changes the outcome — the task lives in exactly that instance — and a miss still fails open (the
- *  one-off human/agent doors, which hold only a bare key, omit it and keep the engine-wide scan). */
+ *  The scan is scoped to the task's ONE owning instance whenever that instance is known — either
+ *  caller-supplied (the convergence poller just discovered the task in its sweep; the auto-apply
+ *  resume runs this once per already-adjudicated PR per pass, so an unfiltered global scan there is
+ *  O(N²) work/REST load across the fleet — Copilot review of #806) or derived from the `user_tasks`
+ *  read model. The instance scope matters for CORRECTNESS, not just load: the SDK engine client's
+ *  `searchUserTasks` sends a filter but no page and consumes a single response page, so an
+ *  engine-wide `openUserTasks()` silently omits every open task past the first-page cut — while the
+ *  poller's PAGED raw-REST sweep already projected that very task into the Tasks inbox with its
+ *  owning `process_key` (issue #977: the inbox lists it, yet every bare-key completion door 404s).
+ *  A user-task key belongs to one instance for life, so the projected `process_key` only narrows
+ *  WHERE the resolve looks — the CREATED-pinned engine scan still decides WHAT is open, and a stale
+ *  projection row (task since completed/canceled) still misses and fails as the 404-style no-op.
+ *  Only a bare key with no projection row (or a row without a `process_key`) keeps the engine-wide
+ *  scan, and a miss there still fails open. */
 async function resolveEscalationTask(
+  data: DataLayer,
   engine: EngineClient,
   userTaskKey: string,
   allowed: ReadonlySet<string> = ESCALATION_TASK_ELEMENTS,
   processInstanceKey?: string,
 ): Promise<{ ok: true; elementId: string; processInstanceKey: string | null } | { ok: false; reason: string }> {
-  const open = await (processInstanceKey ? engine.openUserTasks({ processInstanceKey }) : engine.openUserTasks());
+  let scanInstance = processInstanceKey;
+  if (!scanInstance) {
+    const projected = await userTasks(data).get(userTaskKey);
+    const projectedInstance = projected?.process_key?.trim();
+    scanInstance = projectedInstance ? projectedInstance : undefined;
+  }
+  const open = await (scanInstance ? engine.openUserTasks({ processInstanceKey: scanInstance }) : engine.openUserTasks());
   const match = open.find((t) => t.userTaskKey === userTaskKey);
   if (!match) return { ok: false, reason: "no open completable task" };
   if (!match.elementId || !isCompletableElement(match.elementId, allowed)) {
@@ -723,8 +737,9 @@ export async function completeEscalationAsAgent(
   // instance instead of an engine-wide `openUserTasks()` per decision. A record tick finalises MANY
   // claimed tasks in one pass, so an unfiltered global scan each is O(N²) REST load (issue #889 review);
   // the instance filter makes it O(N) and never changes the outcome (the task lives in exactly that
-  // instance). A bare-key caller (a one-off human/agent door) omits it and keeps the engine-wide scan.
-  const resolved = await resolveEscalationTask(engine, userTaskKey, ESCALATION_TASK_ELEMENTS, input.processInstanceKey ?? undefined);
+  // instance). A bare-key caller (a one-off human/agent door) omits it; the resolve then scopes to the
+  // instance the `user_tasks` projection swept the task in under (issue #977).
+  const resolved = await resolveEscalationTask(data, engine, userTaskKey, ESCALATION_TASK_ELEMENTS, input.processInstanceKey ?? undefined);
   if (!resolved.ok) return resolved;
   const humanOnly = await refuseAutomatedAssessment(data, userTaskKey, resolved.elementId);
   if (humanOnly) return { ok: false, reason: humanOnly };
@@ -759,7 +774,7 @@ export async function completeEscalationAsHuman(
   const operatorId = input.operatorId.trim();
   if (!operatorId) return { ok: false, reason: "operatorId is required" };
 
-  const resolved = await resolveEscalationTask(engine, userTaskKey, HUMAN_COMPLETABLE_ELEMENTS, input.processInstanceKey?.trim() || undefined);
+  const resolved = await resolveEscalationTask(data, engine, userTaskKey, HUMAN_COMPLETABLE_ELEMENTS, input.processInstanceKey?.trim() || undefined);
   if (!resolved.ok) return resolved;
 
   const invalid = validateEscalationVariables(resolved.elementId, input.variables);
@@ -803,7 +818,7 @@ export async function completeEscalationAutoApplied(
   const actorId = input.actor.id.trim();
   if (!actorId) return { ok: false, reason: "actor id is required" };
 
-  const resolved = await resolveEscalationTask(engine, userTaskKey, HUMAN_COMPLETABLE_ELEMENTS, input.processInstanceKey?.trim() || undefined);
+  const resolved = await resolveEscalationTask(data, engine, userTaskKey, HUMAN_COMPLETABLE_ELEMENTS, input.processInstanceKey?.trim() || undefined);
   if (!resolved.ok) return resolved;
   const humanOnly = await refuseAutomatedAssessment(data, userTaskKey, resolved.elementId, input.question);
   if (humanOnly) return { ok: false, reason: humanOnly };

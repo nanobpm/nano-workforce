@@ -290,6 +290,166 @@ test("completer resolves only OPEN tasks — a completed/canceled task's key is 
   assertEquals(completed.length, 0, "a non-open key never drives a doomed re-completion");
 });
 
+test("completer resolves an open task BEYOND the engine-wide search's first page via its projected instance (issue #977)", async () => {
+  // The SDK engine client's `searchUserTasks` sends a filter but no page and consumes ONE response
+  // page, so an unfiltered `openUserTasks()` silently omits every open task past the first-page cut —
+  // while the poller's PAGED raw-REST sweep already projected that very task into the `user_tasks`
+  // inbox WITH its owning `process_key`. A bare-key completion door must scope the engine query to the
+  // projected instance instead of trusting the truncated engine-wide page, or every escalation past
+  // the cut is unanswerable through both the human and the agent door.
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    user_tasks: {
+      rows: [
+        {
+          user_task_key: "ut-late",
+          element_id: "wait-answer",
+          kind_label: "PR review answer",
+          subject_type: "pr",
+          subject_key: "octo/repo#862",
+          subject_title: "t",
+          subject_url: null,
+          question: "Ship it?",
+          process_key: "pi-1",
+          form_key: null,
+          created_at: "t",
+          updated_at: "t",
+        },
+      ],
+      key: "user_task_key",
+    },
+  };
+  const data = memData(stores);
+  const completed: Array<{ userTaskKey: string }> = [];
+  const scans: Array<Record<string, unknown> | undefined> = [];
+  const engine = {
+    openUserTasks: (filter?: Record<string, unknown>) => {
+      scans.push(filter);
+      // The engine-wide scan returns only the first page — ut-late lives past the cut, so an
+      // unfiltered scan can never see it; the instance-scoped scan can.
+      if (!filter?.processInstanceKey) {
+        return Promise.resolve([{ userTaskKey: "ut-old", elementId: "feature-escalation" }]);
+      }
+      return Promise.resolve(
+        filter.processInstanceKey === "pi-1" ? [{ userTaskKey: "ut-late", elementId: "wait-answer", processInstanceKey: "pi-1" }] : [],
+      );
+    },
+    completeUserTask: (userTaskKey: string) => {
+      completed.push({ userTaskKey });
+      return Promise.resolve();
+    },
+  } as any;
+
+  const r = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-late",
+    operatorId: "alice",
+    variables: { answer: "yes" },
+  });
+
+  assertEquals(r.ok, true);
+  assertEquals(r.elementId, "wait-answer");
+  assertEquals(completed.map((c) => c.userTaskKey), ["ut-late"]);
+  assertEquals(scans, [{ processInstanceKey: "pi-1" }], "the resolve scans the projected instance, not the truncated engine-wide page");
+});
+
+test("a STALE projection row never completes a task the engine no longer reports open (issue #977)", async () => {
+  // The projected instance narrows WHERE the resolve looks; it never widens WHAT counts as open. A
+  // `user_tasks` row whose task has since completed/canceled must still miss the CREATED-pinned
+  // per-instance scan and fail as the same 404-style no-op.
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    user_tasks: {
+      rows: [
+        {
+          user_task_key: "ut-stale",
+          element_id: "wait-answer",
+          kind_label: "PR review answer",
+          subject_type: "pr",
+          subject_key: "octo/repo#862",
+          subject_title: "t",
+          subject_url: null,
+          question: "Ship it?",
+          process_key: "pi-1",
+          form_key: null,
+          created_at: "t",
+          updated_at: "t",
+        },
+      ],
+      key: "user_task_key",
+    },
+  };
+  const data = memData(stores);
+  const completed: Array<{ userTaskKey: string }> = [];
+  const engine = {
+    // The engine no longer reports the task open in its owning instance (it completed since the sweep).
+    openUserTasks: (_filter?: Record<string, unknown>) => Promise.resolve([]),
+    completeUserTask: (userTaskKey: string) => {
+      completed.push({ userTaskKey });
+      return Promise.resolve();
+    },
+  } as any;
+
+  const r = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-stale",
+    operatorId: "alice",
+    variables: { answer: "yes" },
+  });
+
+  assertEquals(r.ok, false);
+  assertEquals(r.reason, "no open completable task");
+  assertEquals(completed.length, 0, "a stale projection row never drives a doomed re-completion");
+});
+
+test("a projection row WITHOUT a process_key keeps the engine-wide scan (issue #977)", async () => {
+  // A row the poller projected without an owning instance key gives the resolve nothing to scope to —
+  // fall back to the engine-wide scan exactly as before.
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    user_tasks: {
+      rows: [
+        {
+          user_task_key: "ut-1",
+          element_id: "feature-escalation",
+          kind_label: "Feature escalation",
+          subject_type: "feature",
+          subject_key: "f-1",
+          subject_title: "t",
+          subject_url: null,
+          question: null,
+          process_key: null,
+          form_key: null,
+          created_at: "t",
+          updated_at: "t",
+        },
+      ],
+      key: "user_task_key",
+    },
+  };
+  const data = memData(stores);
+  const completed: Array<{ userTaskKey: string }> = [];
+  const scans: Array<Record<string, unknown> | undefined> = [];
+  const engine = {
+    openUserTasks: (filter?: Record<string, unknown>) => {
+      scans.push(filter);
+      return Promise.resolve(filter ? [] : [{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
+    },
+    completeUserTask: (userTaskKey: string) => {
+      completed.push({ userTaskKey });
+      return Promise.resolve();
+    },
+  } as any;
+
+  const r = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-1",
+    operatorId: "alice",
+    variables: { resolution: "abandon" },
+  });
+
+  assertEquals(r.ok, true);
+  assertEquals(completed.map((c) => c.userTaskKey), ["ut-1"]);
+  assertEquals(scans, [undefined], "no scoped scan when the projection cannot name an instance");
+});
+
 test("a HUMAN operator completes a feature escalation via the SAME attributed resume path (issue #210)", async () => {
   const stores = { task_completions: { rows: [] as any[], key: "id" } };
   const data = memData(stores);
