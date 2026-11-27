@@ -57,7 +57,18 @@ export type DispatchDeliveryGraphResult =
       /** The settings seeded on the instance this dispatch started (issue #1059); absent on a short-circuit. */
       effective?: EffectiveSettings;
     }
-  | { ok: false; errors: { path: string; message: string }[] };
+  | { ok: false; errors: { path: string; message: string }[]; fenced?: true };
+
+/** An approval-scoped launch fence (issue #1111 review — thread deliveryGraphDispatch.ts:199). The
+ * run-row claim serialises launches per `runKey`, but once a run ENDS its row is relaunchable, so two
+ * overlapping requests holding the SAME approval (e.g. one staged proposal revision) could each launch
+ * it. `acquire` atomically consumes that approval and is invoked only AFTER this dispatch wins the run
+ * claim and BEFORE any side effect; a `false` aborts the launch (`fenced: true`) and restores the run
+ * row. `release` returns the approval if the launch then fails, so it can be retried. */
+export interface LaunchFence {
+  acquire: () => Promise<boolean>;
+  release: () => Promise<void>;
+}
 
 /** The LOSSLESS content-identity fingerprint of a graph — `sha256(digest \0
  * canonicalJson(digestInvisibleRawValues(graph)))`. The `digest` is content-addressed over the REDACTED
@@ -94,7 +105,7 @@ async function upsertRunIdentity(
 export async function dispatchDeliveryGraphRun(
   app: Pick<AppApi, "data" | "engine" | "log">,
   graph: unknown,
-  options: { runKey?: string | null; title?: string | null; repository?: string | null; baseBranch?: string | null; repoless?: boolean; expectedDigest?: string | null } & DeliveryRunTimeouts = {},
+  options: { runKey?: string | null; title?: string | null; repository?: string | null; baseBranch?: string | null; repoless?: boolean; expectedDigest?: string | null; launchFence?: LaunchFence } & DeliveryRunTimeouts = {},
 ): Promise<DispatchDeliveryGraphResult> {
   const validationErrors = validateDeliveryGraph(graph);
   if (validationErrors.length > 0) {
@@ -257,6 +268,9 @@ export async function dispatchDeliveryGraphRun(
   // Claim the run durably BEFORE the side effect (the at-most-once dispatch fence). A losing racer
   // never reaches `runDeliveryGraph` — it re-reads the winner's row and short-circuits.
   const claim = buildDeliveryGraphRunRow({ ...rowBase, status: "running", phase: DELIVERY_PHASE.RUNNING, processKey: null });
+  // A value snapshot of the pre-claim row (the claim may refresh a cached row object in place), so a lost
+  // approval fence can restore it exactly.
+  const preClaimRow = existing ? { ...existing } : null;
   const wonClaim = await claimRunForLaunch(app.data, Boolean(existing), claim);
   if (!wonClaim) {
     const won = await runs.get(runKey);
@@ -273,6 +287,40 @@ export async function dispatchDeliveryGraphRun(
       processDefinitionId: won?.process_definition_id ?? undefined,
     };
   }
+  // Approval fence (issue #1111 review): consume the caller's approval atomically now that the run claim
+  // is ours and nothing has launched. Losing it means a concurrent dispatch already launched off this
+  // approval, so restore the pre-claim row exactly (or drop a fresh claim) and refuse — never relaunch.
+  if (options.launchFence) {
+    let acquired: boolean;
+    try {
+      acquired = await options.launchFence.acquire();
+    } catch (err) {
+      acquired = false;
+      app.log.error("dispatch-delivery-graph launch fence threw", { runKey, error: String(err) });
+    }
+    if (!acquired) {
+      if (preClaimRow) {
+        const { run_key, ...restore } = preClaimRow;
+        await runs.update(runKey, restore);
+      } else {
+        await runs.delete(runKey);
+      }
+      app.log.warn("dispatch-delivery-graph refused: approval already consumed by a concurrent dispatch", { runKey });
+      return {
+        ok: false,
+        fenced: true,
+        errors: [{ path: "digest", message: "this approval was already consumed by a concurrent dispatch, so it was NOT launched again; re-stage the graph to run it again" }],
+      };
+    }
+  }
+  let launchSucceeded = false;
+  try {
+    return await launchClaimed();
+  } finally {
+    if (options.launchFence && !launchSucceeded) await options.launchFence.release();
+  }
+
+  async function launchClaimed(): Promise<DispatchDeliveryGraphResult> {
   // On ANY post-claim failure — the identity/patch persistence just below OR the launch further down —
   // flip the claimed row to `failed` so no null-process_key `running` row is ever stranded and later
   // dispatches never short-circuit onto a phantom run.
@@ -384,6 +432,7 @@ export async function dispatchDeliveryGraphRun(
     return { ok: false, errors: launched.errors };
   }
 
+  launchSucceeded = true;
   // Stamp the started instance key onto the claimed row.
   {
     const running = buildDeliveryGraphRunRow({
@@ -418,4 +467,5 @@ export async function dispatchDeliveryGraphRun(
     processDefinitionId: launched.handle.processDefinitionId,
     effective: launched.handle.effective,
   };
+  }
 }

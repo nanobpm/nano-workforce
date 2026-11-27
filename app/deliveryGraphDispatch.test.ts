@@ -514,3 +514,40 @@ test("#1111 dispatchDeliveryGraphRun: when the poller settles the row DURING the
   assert(again.ok && !again.alreadyRunning, "a lost settle CAS must not leave dispatch on the stale running snapshot");
   assertEquals(started.length, 2);
 });
+
+test("#1111 review dispatchDeliveryGraphRun: a relaunch of an ENDED run is fenced on the approval — a second request holding an already-consumed approval launches nothing and restores the row", async () => {
+  const instanceStates = new Map<string, string>();
+  const { app, started, runs } = makeApp({ instanceStates });
+  // One approval (a staged proposal revision), consumable exactly once.
+  let approvals = 1;
+  const fence = {
+    acquire: () => Promise.resolve(approvals-- > 0),
+    release: () => {
+      approvals++;
+      return Promise.resolve();
+    },
+  };
+  const first = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true, launchFence: fence });
+  assert(first.ok && !first.alreadyRunning);
+  // The first launch's instance completes BEFORE the overlapping second request reaches the run check.
+  instanceStates.set("PI-1", "COMPLETED");
+  const second = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true, launchFence: fence });
+  assert(!second.ok && second.fenced === true, "the second request must not relaunch from a consumed approval");
+  assertEquals(started.length, 1);
+  assertEquals(runs()[0].status, "done", "the settled row is restored, not left claimed");
+  assertEquals(runs()[0].process_key, "PI-1");
+});
+
+test("#1111 review dispatchDeliveryGraphRun: a fresh claim that loses the approval fence drops its claim row; a failed launch releases the approval", async () => {
+  const { app, started, runs } = makeApp();
+  const lost = await dispatchDeliveryGraphRun(app, HUMAN_ONLY, { repoless: true, launchFence: { acquire: () => Promise.resolve(false), release: () => Promise.resolve() } });
+  assert(!lost.ok && lost.fenced === true);
+  assertEquals(started.length, 0);
+  assertEquals(runs().length, 0);
+  let released = 0;
+  app.engine.createInstance = () => Promise.reject(new Error("engine down"));
+  await assertRejects(() =>
+    dispatchDeliveryGraphRun(app, HUMAN_ONLY, { repoless: true, launchFence: { acquire: () => Promise.resolve(true), release: () => Promise.resolve(void released++) } }),
+  );
+  assertEquals(released, 1);
+});

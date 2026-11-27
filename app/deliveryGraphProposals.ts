@@ -388,6 +388,18 @@ export async function markProposalDispatched(data: DataLayer, digest: string, ex
   return res.changed > 0;
 }
 
+/** Undo a pre-launch {@link markProposalDispatched} claim when the launch it fenced then FAILED (issue
+ * #1111 review), so the approval can be retried. Guarded on `status='dispatched'` AND the exact
+ * `stage_seq` that was consumed, so it can never resurrect a different revision. */
+export async function markProposalUndispatched(data: DataLayer, digest: string, stageSeq: number): Promise<boolean> {
+  const db = data.open();
+  const res = await db.exec(
+    `UPDATE "delivery_graph_proposals" SET "status" = 'staged', "updated_at" = ? WHERE "digest" = ? AND "status" = 'dispatched' AND "stage_seq" = ?`,
+    [now(), digest, stageSeq],
+  );
+  return res.changed > 0;
+}
+
 /** Retire a proposal by flipping it to `expired` — its `graph` payload is unusable (e.g. corrupt JSON
  * detected at dispatch), so it can never launch. Reuses the terminal `expired` status the sweep already
  * uses, so a fail-closed retirement drops the row out of the cockpit's staged grid instead of leaving an

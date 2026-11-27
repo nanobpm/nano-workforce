@@ -15,7 +15,7 @@ import { isPlausibleBranchName } from "../app/baseBranch.ts";
 import { canonicalJson, validateDeliveryGraph } from "../app/deliveryGraph.ts";
 import { digestInvisibleRawValues, graphCarriesRedactedSecrets } from "../app/deliveryGraphCompiler.ts";
 import { dispatchDeliveryGraphRun } from "../app/deliveryGraphDispatch.ts";
-import { getStagedProposal, markProposalDispatched, markProposalExpired } from "../app/deliveryGraphProposals.ts";
+import { getStagedProposal, markProposalDispatched, markProposalExpired, markProposalUndispatched } from "../app/deliveryGraphProposals.ts";
 import { unresolvedAgentRepoNodes } from "../app/deliveryRunner.ts";
 import { ALREADY_RUNNING_WARNING } from "../app/effectiveSettings.ts";
 import { isValidIsoDuration } from "../app/reviewWait.ts";
@@ -273,7 +273,38 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     }
   }
 
-  const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: dispatchRunKey, title: proposal.title, repository, baseBranch, repoless, expectedDigest: digest, autoResolveEscalations, ...timeouts });
+  // Fence the LAUNCH on this approval (issue #1111 review — thread deliveryGraphDispatch.ts:199): the
+  // run-row claim alone cannot stop a second overlapping request that read this same staged revision
+  // from relaunching once the first's instance has ended. So the core consumes the proposal ATOMICALLY
+  // (`staged`→`dispatched`, pinned to `stageSeq`) after winning the run claim and BEFORE launching; the
+  // loser aborts with `fenced`. An equivalent re-stage that bumped `stage_seq` in our window is the same
+  // graph, so it is consumed at its current revision. A failed launch returns the approval.
+  let consumedSeq: number | null = null;
+  const launchFence = {
+    acquire: async (): Promise<boolean> => {
+      if (await markProposalDispatched(app.data, digest, stageSeq)) {
+        consumedSeq = stageSeq;
+        return true;
+      }
+      const restaged = await getStagedProposal(app.data, digest);
+      if (restaged && isEquivalentReStage(restaged, proposal.graph) && (await markProposalDispatched(app.data, digest, restaged.stage_seq))) {
+        consumedSeq = restaged.stage_seq;
+        return true;
+      }
+      return false;
+    },
+    release: async (): Promise<void> => {
+      if (consumedSeq !== null) await markProposalUndispatched(app.data, digest, consumedSeq);
+      consumedSeq = null;
+    },
+  };
+  const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: dispatchRunKey, title: proposal.title, repository, baseBranch, repoless, expectedDigest: digest, autoResolveEscalations, launchFence, ...timeouts });
+  if (!dispatched.ok && dispatched.fenced) {
+    return {
+      status: 409,
+      body: { ok: false, error: `staged proposal ${digest} was already dispatched by a concurrent request; it was NOT launched again — re-stage it to run it again` },
+    };
+  }
   if (!dispatched.ok) {
     app.log.warn("dispatch-delivery-graph refused: compile", { digest, errors: dispatched.errors.length });
     const outBody: DeliveryGraphTextResult = {
@@ -353,7 +384,8 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
       },
     };
   }
-  const marked = await markProposalDispatched(app.data, digest, stageSeq);
+  // A fresh launch already consumed the proposal inside the fence; only a short-circuit still needs it.
+  const marked = consumedSeq !== null || (await markProposalDispatched(app.data, digest, stageSeq));
   if (!marked) {
     // The row left the `staged` revision we snapshotted between our load and this flip. Distinguish the
     // two reasons it moved, because they need OPPOSITE handling:
