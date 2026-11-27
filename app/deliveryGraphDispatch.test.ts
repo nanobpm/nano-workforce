@@ -12,7 +12,7 @@ import { dispatchDeliveryGraphRun } from "./deliveryGraphDispatch.ts";
 import { isStaleLaunchClaim } from "./deliveryGraphRun.ts";
 import { noopLog } from "../test/log.ts";
 
-function makeApp(opts: { failIdentityWrite?: boolean; reconcileReadThrows?: { on: boolean }; liveOriginal?: { processInstanceKey: string; runKey: string | null; processDefinitionId?: string }; instanceStates?: Map<string, string> } = {}) {
+function makeApp(opts: { failIdentityWrite?: boolean; reconcileReadThrows?: { on: boolean }; liveOriginal?: { processInstanceKey: string; runKey: string | null; processDefinitionId?: string }; instanceStates?: Map<string, string>; onInstanceRead?: () => void } = {}) {
   const tables = new Map<string, Record<string, unknown>[]>();
   const started: { processDefinitionId: string; variables?: Record<string, unknown> }[] = [];
   const cancelled: string[] = [];
