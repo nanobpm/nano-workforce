@@ -480,6 +480,16 @@ clicks **Dispatch**. That click is the approval, bound to the previewed digest. 
 accepts `autoResolveEscalations` (§3). The running graph shows in **Active Delivery Graphs**,
 and `human` nodes are answered like escalations (§3), emitting their declared facts.
 
+**Re-dispatching a finished graph (issue #1111).** Dispatch never trusts a `running` run record:
+before it short-circuits a re-dispatch as `alreadyRunning`, it reads the record's engine instance. If
+that instance has already COMPLETED (or was TERMINATED), dispatch closes the record the same way the
+poller would (`done` / `abandoned`, process instance key kept) and starts a new instance
+(`alreadyRunning: false`). So a record left `running` after its instance ended needs no operator
+action and is **not** cancelled: dispatch the digest again. If the engine does not report the
+instance, dispatch keeps the safe `alreadyRunning` answer. A record with no instance key is a launch
+claim. After 15 minutes it is reclaimable by the next dispatch, which first cancels any still-live
+original of the run, or the poller retires it to `failed`.
+
 **Watch a running graph node by node** (tool `getDeliveryGraphRun`, `d8ctl nwf graph progress <runKey>`):
 
 ```bash

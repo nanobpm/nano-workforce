@@ -12,7 +12,7 @@ import { dispatchDeliveryGraphRun } from "./deliveryGraphDispatch.ts";
 import { isStaleLaunchClaim } from "./deliveryGraphRun.ts";
 import { noopLog } from "../test/log.ts";
 
-function makeApp(opts: { failIdentityWrite?: boolean; reconcileReadThrows?: { on: boolean }; liveOriginal?: { processInstanceKey: string; runKey: string | null; processDefinitionId?: string } } = {}) {
+function makeApp(opts: { failIdentityWrite?: boolean; reconcileReadThrows?: { on: boolean }; liveOriginal?: { processInstanceKey: string; runKey: string | null; processDefinitionId?: string }; instanceStates?: Map<string, string> } = {}) {
   const tables = new Map<string, Record<string, unknown>[]>();
   const started: { processDefinitionId: string; variables?: Record<string, unknown> }[] = [];
   const cancelled: string[] = [];
@@ -66,6 +66,15 @@ function makeApp(opts: { failIdentityWrite?: boolean; reconcileReadThrows?: { on
       open: () => {
         const exec = (sql: string, params: unknown[]) =>
           Promise.resolve().then(() => {
+            // The ended-run settle CAS (settleEndedRunningRun, issue #1111): guarded on the observed
+            // (`status='running'`, `process_key`) snapshot.
+            if (sql.includes('AND "status" = \'running\' AND "process_key" = ?')) {
+              const [status, phase, updatedAt, key, processKey] = params;
+              const row = (tables.get("delivery_graph_runs") ?? []).find((r) => r["run_key"] === key);
+              if (!row || row["status"] !== "running" || row["process_key"] !== processKey) return { changed: 0 };
+              Object.assign(row, { status, phase, phase_node_id: null, updated_at: updatedAt });
+              return { changed: 1 };
+            }
             const cols = [...sql.matchAll(/"(\w+)"\s*=\s*\?/g)].map((m) => m[1]);
             // The claim CAS (claimRunForLaunch) ends `… WHERE "run_key" = ? AND ("status" <> 'running'
             // OR ("process_key" IS NULL AND "updated_at" < ?))` — the run_key is the 2nd-to-last param,
@@ -98,7 +107,15 @@ function makeApp(opts: { failIdentityWrite?: boolean; reconcileReadThrows?: { on
       // instance (a dispatch that died after createInstance but before stamping the key) so the test can
       // assert the relaunch cancels it. `liveOriginal.runKey === null` models an instance whose runKey
       // variable is absent/unreadable — it must NOT be cancelled (unproven ownership).
-      searchProcessInstances: (filter?: { processDefinitionId?: string; state?: string }) =>
+      searchProcessInstances: (filter?: { processDefinitionId?: string; state?: string; processInstanceKeys?: string[] }) =>
+        filter?.processInstanceKeys !== undefined
+          ? Promise.resolve(
+              filter.processInstanceKeys.flatMap((k) => {
+                const state = opts.instanceStates?.get(k);
+                return state === undefined ? [] : [{ processInstanceKey: k, state }];
+              }),
+            )
+          :
         // A reconcile READ failure (issue #853 review — thread deliveryGraphDispatch.ts:280): the
         // reconcile pass queries by `processDefinitionId`, so gate the transient throw on that filter.
         opts.reconcileReadThrows?.on && filter?.processDefinitionId !== undefined
@@ -435,4 +452,41 @@ test("#1059 dispatchDeliveryGraphRun: a fresh launch carries `effective`; an alr
   if (!second.ok) return;
   assertEquals(second.alreadyRunning, true);
   assertEquals(second.effective, undefined, "no request-derived settings are echoed for a run this call did not start");
+});
+
+test("#1111 dispatchDeliveryGraphRun: a run whose instance COMPLETED (poller not yet reconciled) is closed `done` and a re-dispatch starts a NEW instance", async () => {
+  const instanceStates = new Map<string, string>();
+  const { app, started, runs } = makeApp({ instanceStates });
+  const first = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });
+  assert(first.ok);
+  if (!first.ok) return;
+  assertEquals(first.processInstanceKey, "PI-1");
+  instanceStates.set("PI-1", "ACTIVE");
+  // While the instance is live, a re-dispatch still short-circuits (at-most-once).
+  const live = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });
+  assert(live.ok && live.alreadyRunning);
+  // The engine instance completes; the row still reads `running` (the poller hasn't run).
+  instanceStates.set("PI-1", "COMPLETED");
+  assertEquals(runs()[0].status, "running");
+  const again = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });
+  assert(again.ok);
+  if (!again.ok) return;
+  assertEquals(again.alreadyRunning, false);
+  assertEquals(again.processInstanceKey, "PI-2");
+  assertEquals(started.length, 2);
+  assertEquals(runs()[0].process_key, "PI-2");
+});
+
+test("#1111 dispatchDeliveryGraphRun: a run whose instance TERMINATED out of band is closed and relaunched; an UNKNOWN instance state is never treated as ended", async () => {
+  const instanceStates = new Map<string, string>();
+  const { app, started } = makeApp({ instanceStates });
+  const first = await dispatchDeliveryGraphRun(app, HUMAN_ONLY, { repoless: true });
+  assert(first.ok);
+  // Engine does not report the instance (eventual consistency) → conservative short-circuit.
+  const unknown = await dispatchDeliveryGraphRun(app, HUMAN_ONLY, { repoless: true });
+  assert(unknown.ok && unknown.alreadyRunning);
+  instanceStates.set("PI-1", "TERMINATED");
+  const again = await dispatchDeliveryGraphRun(app, HUMAN_ONLY, { repoless: true });
+  assert(again.ok && !again.alreadyRunning);
+  assertEquals(started.length, 2);
 });

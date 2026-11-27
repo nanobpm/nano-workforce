@@ -27,6 +27,7 @@ import {
   deliveryGraphRuns,
   isStaleLaunchClaim,
   reconcileOriginalInstanceBeforeRelaunch,
+  settleEndedRunningRun,
 } from "./deliveryGraphRun.ts";
 import type { DeliveryRunTimeouts } from "./deliveryRunner.ts";
 import { deliveryGraphDigest, runDeliveryGraph } from "./deliveryRunner.ts";
@@ -188,7 +189,22 @@ export async function dispatchDeliveryGraphRun(
   };
 
   // Idempotency short-circuit — a re-dispatch onto a still-running run does NOT double-launch.
-  const existing = await runs.get(runKey);
+  let existing = await runs.get(runKey);
+  // Never TRUST a `running` row (issue #1111): if its launched instance has already ended in the engine
+  // (the poller's COMPLETED→done pass lagging or wedged), close it through the poller's own projection —
+  // `done`/`abandoned`, process key kept — so this dispatch relaunches instead of short-circuiting
+  // `alreadyRunning` onto a finished run. A read failure falls through to the conservative short-circuit.
+  if (existing && existing.status === "running") {
+    try {
+      const settled = await settleEndedRunningRun(app.data, app.engine, existing);
+      if (settled !== null) {
+        app.log.info("dispatch-delivery-graph closed a running row whose instance had ended", { runKey, status: settled, processInstanceKey: existing.process_key });
+        existing = await runs.get(runKey);
+      }
+    } catch (err) {
+      app.log.warn("dispatch-delivery-graph could not check the running row against the engine", { runKey, error: String(err) });
+    }
+  }
   // Capture staleness NOW, off the pre-claim snapshot, and reuse that ONE decision below: the claim
   // CAS below rewrites `updated_at`, so a staleness check after it would read the fresh claim and
   // never fire. Only a STALE re-claim needs reconcile-before-relaunch (a fresh claim or a terminal-row

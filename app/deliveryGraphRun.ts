@@ -550,3 +550,37 @@ export function buildDeliveryGraphRunRow(input: {
     incident_since: null,
   };
 }
+
+/** Settle a `running` row whose LAUNCHED engine instance has already ended — the dispatch-side
+ * reconcile (issue #1111). The poller's {@link deriveDeliveryPhase} pass normally flips a COMPLETED
+ * instance's row to `done`, but if that pass is wedged or lagging the row stays `running` and every
+ * re-dispatch of the digest short-circuits `alreadyRunning` onto a finished run — the dispatch dedupe
+ * then disagrees with `/status` about what is active. So dispatch never TRUSTS a `running` row: it
+ * reads the engine and, when the stamped instance is COMPLETED/TERMINATED, closes the row through the
+ * SAME projection the poller uses (`done` / `abandoned`, the process key KEPT) before deciding.
+ *
+ * The flip is a compare-and-swap on the observed `(status='running', process_key)` snapshot: a launch
+ * claim always CLEARS `process_key`, so a row a concurrent dispatch has re-claimed no longer matches
+ * and is never clobbered. Returns the settled status, or `null` when the row is left untouched (not
+ * running, no instance key yet — an in-flight launch claim, governed by {@link isStaleLaunchClaim} —,
+ * the instance is still live, or the engine did not report it). An unknown state is NEVER treated as
+ * ended: closing a live run would let the next dispatch double-launch it. */
+export async function settleEndedRunningRun(
+  data: DataLayer,
+  engine: Pick<EngineClient, "searchProcessInstances">,
+  run: Pick<DeliveryGraphRun, "run_key" | "status" | "process_key">,
+): Promise<DeliveryGraphRunStatus | null> {
+  if (run.status !== "running" || !run.process_key) return null;
+  const processKey = run.process_key;
+  const snapshots = await engine.searchProcessInstances({ processInstanceKeys: [processKey] });
+  const state = snapshots.find((s) => String(s.processInstanceKey) === processKey)?.state ?? null;
+  if (state !== "COMPLETED" && state !== "TERMINATED") return null;
+  const projection = deriveDeliveryPhase(state, [], {});
+  const flip = await data
+    .open()
+    .exec(
+      `UPDATE "delivery_graph_runs" SET "status" = ?, "phase" = ?, "phase_node_id" = NULL, "updated_at" = ? WHERE "run_key" = ? AND "status" = 'running' AND "process_key" = ?`,
+      [projection.status, projection.phase, now(), run.run_key, processKey],
+    );
+  return flip.changed === 1 ? projection.status : null;
+}
