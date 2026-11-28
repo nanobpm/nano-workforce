@@ -5307,12 +5307,16 @@ export async function pollDeliveryGraphPhase(
       const state = snapshots.find((s) => String(s.processInstanceKey) === processKey)?.state ?? null;
       const projection = deriveDeliveryPhase(state, parks, parseHumanLabels(run.human_labels));
       if (run.status !== projection.status || run.phase !== projection.phase || run.phase_node_id !== projection.phase_node_id) {
-        await deliveryGraphRuns(data).update(run.run_key, {
-          status: projection.status,
-          phase: projection.phase,
-          phase_node_id: projection.phase_node_id,
-          updated_at: now(),
-        });
+        // CAS on the snapshot we projected from (issue #1111 review): a dispatch may have settled this row
+        // and launched a REPLACEMENT instance between our `find()` and here. Matching only `run_key` would
+        // write the OLD instance's COMPLETED projection over the live replacement (marking it `done` and
+        // inviting a duplicate dispatch), so require the row still be `running` on the observed process key.
+        await data
+          .open()
+          .exec(
+            `UPDATE "delivery_graph_runs" SET "status" = ?, "phase" = ?, "phase_node_id" = ?, "updated_at" = ? WHERE "run_key" = ? AND "status" = 'running' AND "process_key" = ?`,
+            [projection.status, projection.phase, projection.phase_node_id, now(), run.run_key, processKey],
+          );
       }
     } catch (err) {
       console.error(`[poller] delivery graph ${run.run_key}: ${err}`);

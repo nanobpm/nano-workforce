@@ -21,6 +21,7 @@ import {
   markProposalDismissed,
   markProposalDispatched,
   markProposalExpired,
+  markProposalUndispatched,
   proposalExpiry,
   proposalLogicalKey,
   proposalReviewUrl,
@@ -725,5 +726,33 @@ test("markProposalExpired: an `expectedStageSeq` guard NO-OPs when a concurrent 
     // Guarded on the CURRENT revision, it retires as usual.
     assertEquals(await markProposalExpired(data, "d1", seq1), true);
     assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "expired");
+  });
+});
+test("markProposalUndispatched: a failed launch restores the claimed approval to `staged` when no newer revision exists (#1111)", async () => {
+  await withData(async (data) => {
+    await stageProposal(data, row({ digest: "d1" }));
+    const seq = (await getStagedProposal(data, "d1"))?.stage_seq ?? 0;
+    assertEquals(await markProposalDispatched(data, "d1", seq), true);
+    assertEquals(await markProposalUndispatched(data, "d1", seq), true);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "staged");
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.stage_seq, seq);
+  });
+});
+
+test("markProposalUndispatched: a newer same-logical-key revision staged while the approval was held `dispatched` makes the return land `superseded` — never two dispatchable revisions (#1111 review)", async () => {
+  await withData(async (data) => {
+    await stageProposal(data, row({ digest: "d1" }));
+    const seq = (await getStagedProposal(data, "d1"))?.stage_seq ?? 0;
+    // Fence acquired: the approval is claimed `dispatched`.
+    assertEquals(await markProposalDispatched(data, "d1", seq), true);
+    // A replacement revision of the same logical graph is staged mid-launch.
+    await stageProposal(data, row({ digest: "d2" }));
+    // The launch fails; the fence releases the claim.
+    assertEquals(await markProposalUndispatched(data, "d1", seq), true);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "superseded");
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.stage_seq, seq);
+    assertEquals((await deliveryGraphProposals(data).get("d2"))?.status, "staged");
+    const live = (await listStagedProposals(data)).filter((r) => r.logical_key === "runbook").map((r) => r.digest);
+    assertEquals(live, ["d2"]);
   });
 });
